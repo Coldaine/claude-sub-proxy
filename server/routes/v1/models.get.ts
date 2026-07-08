@@ -1,4 +1,5 @@
-import { STATIC_MODELS, isAuthorized } from "../../lib/proxy";
+import { isAuthorized } from "../../lib/proxy";
+import { listedModels, modelEntry } from "../../lib/models";
 
 export default defineEventHandler((event) => {
   if (!isAuthorized(getHeader(event, "authorization"))) {
@@ -7,6 +8,6 @@ export default defineEventHandler((event) => {
   }
   return {
     object: "list",
-    data: STATIC_MODELS.map((m) => ({ id: m, object: "model", created: 0, owned_by: "anthropic" })),
+    data: listedModels().map(modelEntry),
   };
 });

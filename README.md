@@ -3,10 +3,10 @@
 An OpenAI-compatible HTTP endpoint that fronts the **Claude Agent SDK** and bills
 your **Claude subscription** (Max) — with **caller-side function-call passthrough**.
 
-Point any OpenAI chat-completions client (it was built for [Hermes
-Agent](https://github.com/NousResearch/hermes-agent)'s `provider: custom`) at it,
-and use Claude as the model backend without funding a separate pay-per-token
-`ANTHROPIC_API_KEY`.
+Point any OpenAI-compatible client (it was built for [Hermes
+Agent](https://github.com/NousResearch/hermes-agent)'s `provider: custom`, and
+also supports Chat Completions / Responses clients) at it, and use Claude as the
+model backend without funding a separate pay-per-token `ANTHROPIC_API_KEY`.
 
 ## Why this exists
 
@@ -60,7 +60,8 @@ pnpm start          # node .output/server/index.mjs (honours .env)
 nix run github:cramt/claude-sub-proxy
 ```
 
-Smoke test (plain completion + a full tool round-trip):
+Smoke test (models, Chat Completions, Responses, streaming, and a full tool
+round-trip):
 
 ```bash
 pnpm build && node .output/server/index.mjs &   # in one shell
@@ -77,12 +78,43 @@ PORT=8787 node smoke.mjs                          # in another
 | `API_KEY` | _(none)_ | Optional bearer token clients must present |
 | `ALLOW_API_KEY` | `0` | `1` keeps `ANTHROPIC_API_KEY` (metered billing) |
 | `CLAUDE_CLI_PATH` | _(bundled)_ | Path to the `claude` executable to drive |
+| `STREAM_KEEPALIVE_MS` | `15000` | SSE comment keepalive interval while Claude is running |
 
 ## Endpoints
 
 - `POST /v1/chat/completions` — streaming (`stream: true`) and non-streaming, with `tools`/`tool_calls`.
-- `GET /v1/models` — static Claude model list (for client discovery).
+- `POST /v1/responses` — streaming and non-streaming OpenAI Responses compatibility, including function-call output continuation.
+- `GET /v1/models` — Claude model list for client discovery.
+- `GET /v1/models/:id` — selected model metadata for clients that probe a configured model.
 - `GET /health` — status + billing mode.
+
+Streaming endpoints send an initial SSE comment (`: connected`) immediately,
+periodic keepalive comments while Claude is running, and a final `data: [DONE]`.
+
+### Models
+
+The proxy advertises and accepts Claude model ids such as:
+
+- `claude-opus-4-8`
+- `claude-opus-4-7`
+- `claude-opus-4-6`
+- `claude-sonnet-4-6`
+- `claude-sonnet-4-5`
+- `claude-haiku-4-5`
+
+Unknown model ids are passed through to the Claude SDK unchanged so the proxy
+does not invent OpenAI model names or map non-Claude ids onto Claude.
+
+## OpenAI-compatible clients
+
+Use:
+
+- Base URL: `http://127.0.0.1:8787/v1`
+- API key: any placeholder value, unless you set `API_KEY` on the proxy
+- Model: one of the Claude model ids returned by `GET /v1/models`
+
+If a client has an HTTP compatibility mode for custom OpenAI endpoints, enable it.
+That usually reduces assumptions about exact OpenAI-hosted transport behavior.
 
 ## Point Hermes at it
 

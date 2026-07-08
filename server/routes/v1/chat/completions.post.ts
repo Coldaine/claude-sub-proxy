@@ -1,7 +1,7 @@
 import {
   processChatCompletion,
   completionJson,
-  writeStreaming,
+  writeStreamingPending,
   manager,
   isAuthorized,
 } from "../../../lib/proxy";
@@ -35,6 +35,11 @@ export default defineEventHandler(async (event) => {
     /* best effort */
   }
 
+  if (body.stream) {
+    writeStreamingPending(event.node.res, processChatCompletion(body));
+    return;
+  }
+
   const { boundary, sessionId, model } = await processChatCompletion(body);
 
   if (boundary.kind === "error") {
@@ -44,11 +49,5 @@ export default defineEventHandler(async (event) => {
   }
   if (boundary.kind === "final") manager.remove(sessionId);
 
-  if (body.stream) {
-    // Write the SSE stream straight to the node response and end it; returning
-    // undefined leaves the already-sent response untouched.
-    writeStreaming(event.node.res, model, boundary);
-    return;
-  }
   return completionJson(model, boundary);
 });

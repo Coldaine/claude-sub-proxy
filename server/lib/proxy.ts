@@ -9,6 +9,7 @@ import {
   type OpenAIMessage,
   type OpenAITool,
 } from "./openai-types";
+import { CLAUDE_MODELS } from "./models";
 
 export const DEFAULT_MODEL = process.env.DEFAULT_MODEL || undefined;
 export const PROXY_API_KEY = process.env.API_KEY || undefined;
@@ -19,14 +20,7 @@ const CLAUDE_CLI_PATH = process.env.CLAUDE_CLI_PATH || undefined;
 // stateless HTTP requests by the tool_call ids we hand back.
 export const manager = new SessionManager();
 
-export const STATIC_MODELS = [
-  "claude-opus-4-8",
-  "claude-opus-4-7",
-  "claude-opus-4-6",
-  "claude-sonnet-4-6",
-  "claude-sonnet-4-5",
-  "claude-haiku-4-5",
-];
+export const STATIC_MODELS = CLAUDE_MODELS;
 
 // The whole point: bill the Claude *subscription*, not a metered API key. The
 // Agent SDK uses the logged-in Claude credentials only when ANTHROPIC_API_KEY
@@ -113,6 +107,8 @@ export async function processChatCompletion(body: ChatCompletionRequest): Promis
   return { boundary, sessionId: session.id, model };
 }
 
+export type ChatCompletionResult = Awaited<ReturnType<typeof processChatCompletion>>;
+
 const completionId = () => `chatcmpl-${Math.random().toString(36).slice(2)}`;
 
 export function completionJson(model: string, boundary: Boundary) {
@@ -145,13 +141,76 @@ function finishReason(boundary: Boundary): "tool_calls" | "stop" {
   return boundary.kind === "tool_calls" ? "tool_calls" : "stop";
 }
 
-/** Write an OpenAI-style SSE stream for a completed boundary, then end. */
-export function writeStreaming(res: import("node:http").ServerResponse, model: string, boundary: Boundary): void {
+function writeSseHead(res: import("node:http").ServerResponse): () => void {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
     Connection: "keep-alive",
   });
+  res.write(": connected\n\n");
+  const keepalive = setInterval(() => {
+    if (!canWrite(res)) return;
+    res.write(": keepalive\n\n");
+  }, Number(process.env.STREAM_KEEPALIVE_MS ?? 15000));
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    clearInterval(keepalive);
+  };
+  res.once("close", cleanup);
+  res.once("finish", cleanup);
+  return cleanup;
+}
+
+/** Write an OpenAI-style SSE stream for a completed boundary, then end. */
+export function writeStreaming(res: import("node:http").ServerResponse, model: string, boundary: Boundary): void {
+  const cleanup = writeSseHead(res);
+  writeChatCompletionChunks(res, model, boundary);
+  cleanup();
+  res.write("data: [DONE]\n\n");
+  res.end();
+}
+
+/** Open the SSE stream before Claude finishes, then write the completed boundary. */
+export function writeStreamingPending(
+  res: import("node:http").ServerResponse,
+  pending: Promise<ChatCompletionResult>,
+): void {
+  const cleanup = writeSseHead(res);
+  void (async () => {
+    try {
+      const { boundary, sessionId, model } = await pending;
+      if (boundary.kind === "error") {
+        manager.remove(sessionId);
+        if (canWrite(res)) writeChatCompletionError(res, model, boundary.message);
+      } else {
+        if (boundary.kind === "final") manager.remove(sessionId);
+        if (canWrite(res)) writeChatCompletionChunks(res, model, boundary);
+      }
+    } catch (err) {
+      if (canWrite(res)) {
+        writeChatCompletionError(res, DEFAULT_MODEL ?? "", err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      cleanup();
+      if (canWrite(res)) {
+        res.write("data: [DONE]\n\n");
+        res.end();
+      }
+    }
+  })();
+}
+
+function canWrite(res: import("node:http").ServerResponse): boolean {
+  return !res.destroyed && !res.writableEnded;
+}
+
+function writeChatCompletionChunks(
+  res: import("node:http").ServerResponse,
+  model: string,
+  boundary: Boundary,
+): void {
   const base = {
     id: completionId(),
     object: "chat.completion.chunk",
@@ -180,6 +239,26 @@ export function writeStreaming(res: import("node:http").ServerResponse, model: s
     send({ role: "assistant", content: boundary.kind === "final" ? boundary.text : "" }, null);
     send({}, "stop");
   }
-  res.write("data: [DONE]\n\n");
-  res.end();
+}
+
+function writeChatCompletionError(
+  res: import("node:http").ServerResponse,
+  model: string,
+  message: string,
+): void {
+  const base = {
+    id: completionId(),
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1000),
+    model,
+  };
+  res.write(`data: ${JSON.stringify({
+    ...base,
+    choices: [{
+      index: 0,
+      delta: { role: "assistant", content: "" },
+      finish_reason: "stop",
+    }],
+    error: { message, type: "upstream_error" },
+  })}\n\n`);
 }
